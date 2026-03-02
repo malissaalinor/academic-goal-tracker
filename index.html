@@ -13,7 +13,7 @@
 <body class="bg-slate-50">
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect, useRef } = React;
+    const { useState, useEffect, useRef, useCallback } = React;
 
     const SUPABASE_URL = "https://qsmwntezeumnnlxhemiu.supabase.co";
     const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzbXdudGV6ZXVtbm5seGhlbWl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE5NzY1NDYsImV4cCI6MjA4NzU1MjU0Nn0.PApvzpPmcqpg7SxRgaXtU5FJgMkGEExMF1A6qE-d1Qg";
@@ -25,6 +25,9 @@
     const CATEGORIES = ["Research", "Teaching", "Service", "Writing", "Other"];
     const PRIORITIES = ["High", "Medium", "Low"];
     const TIME_CATS = ["Research", "Teaching", "Service"];
+    const DIARY_CATS = ["Research", "Teaching", "Service/Meetings", "Writing"];
+    const TIMES_OF_DAY = ["Morning (6-12)", "Afternoon (12-17)", "Evening (17-22)"];
+    const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
     const statusColors = {
       Active: "bg-emerald-100 text-emerald-800",
@@ -48,10 +51,35 @@
       Research: "bg-violet-100 text-violet-700",
       Teaching: "bg-sky-100 text-sky-700",
       Service: "bg-amber-100 text-amber-700",
-      Other: "bg-gray-100 text-gray-600",
+      "Service/Meetings": "bg-amber-100 text-amber-700",
       Writing: "bg-pink-100 text-pink-700",
+      Other: "bg-gray-100 text-gray-600",
+    };
+    const diaryColors = {
+      Research: "#7c3aed",
+      Teaching: "#0284c7",
+      "Service/Meetings": "#d97706",
+      Writing: "#db2777",
     };
 
+    function getWeekKey(date = new Date()) {
+      const d = new Date(date);
+      d.setHours(0,0,0,0);
+      d.setDate(d.getDate() - (d.getDay() === 0 ? 6 : d.getDay() - 1));
+      return d.toISOString().split("T")[0];
+    }
+    function getDayOfWeek(dateStr) {
+      const d = new Date(dateStr);
+      const day = d.getDay();
+      return day === 0 ? 6 : day - 1; // 0=Mon
+    }
+    function getTimeOfDay(timeStr) {
+      if (!timeStr) return 0;
+      const h = parseInt(timeStr.split(":")[0]);
+      if (h < 12) return 0;
+      if (h < 17) return 1;
+      return 2;
+    }
     function daysUntil(d) { if (!d) return null; return Math.ceil((new Date(d) - new Date()) / 86400000); }
     function DeadlineBadge({ date }) {
       const d = daysUntil(date);
@@ -66,7 +94,7 @@
     function Modal({ title, children, onClose }) {
       return (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 px-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 max-h-screen overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="font-semibold text-slate-800">{title}</h3>
               <button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
@@ -77,14 +105,86 @@
       );
     }
 
+    // Simple SVG Pie Chart
+    function PieChart({ data }) {
+      const total = data.reduce((s, d) => s + d.value, 0);
+      if (total === 0) return <div className="text-center text-slate-400 py-8">No data yet</div>;
+      let cumAngle = -Math.PI / 2;
+      const slices = data.map(d => {
+        const angle = (d.value / total) * 2 * Math.PI;
+        const x1 = 100 + 80 * Math.cos(cumAngle);
+        const y1 = 100 + 80 * Math.sin(cumAngle);
+        cumAngle += angle;
+        const x2 = 100 + 80 * Math.cos(cumAngle);
+        const y2 = 100 + 80 * Math.sin(cumAngle);
+        const large = angle > Math.PI ? 1 : 0;
+        return { ...d, path: `M100,100 L${x1},${y1} A80,80 0 ${large},1 ${x2},${y2} Z`, pct: ((d.value/total)*100).toFixed(1) };
+      });
+      return (
+        <div className="flex flex-col items-center">
+          <svg viewBox="0 0 200 200" className="w-48 h-48">
+            {slices.map((s, i) => <path key={i} d={s.path} fill={s.color} stroke="white" strokeWidth="2" />)}
+          </svg>
+          <div className="flex flex-wrap justify-center gap-3 mt-3">
+            {slices.map((s, i) => (
+              <div key={i} className="flex items-center gap-1.5 text-xs">
+                <div className="w-3 h-3 rounded-full" style={{ background: s.color }} />
+                <span className="text-slate-600">{s.label}</span>
+                <span className="font-semibold text-slate-800">{s.pct}%</span>
+                <span className="text-slate-400">({s.value.toFixed(1)}h)</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // Heatmap
+    function Heatmap({ entries }) {
+      const productive = entries.filter(e => e.category === "Research" || e.category === "Writing");
+      const grid = Array(7).fill(null).map(() => Array(3).fill(0));
+      productive.forEach(e => {
+        const day = getDayOfWeek(e.date);
+        const tod = getTimeOfDay(e.time_of_day);
+        if (day >= 0 && day < 7) grid[day][tod] += parseFloat(e.hours || 0);
+      });
+      const max = Math.max(...grid.flat(), 0.1);
+      return (
+        <div>
+          <div className="flex gap-1 mb-1 ml-10">
+            {TIMES_OF_DAY.map(t => <div key={t} className="flex-1 text-center text-xs text-slate-400">{t.split(" ")[0]}</div>)}
+          </div>
+          {DAYS.map((day, di) => (
+            <div key={day} className="flex items-center gap-1 mb-1">
+              <div className="w-8 text-xs text-slate-500 text-right">{day}</div>
+              {[0,1,2].map(ti => {
+                const val = grid[di][ti];
+                const intensity = val / max;
+                const bg = val === 0 ? "#f1f5f9" : `rgba(124, 58, 237, ${0.15 + intensity * 0.85})`;
+                return (
+                  <div key={ti} className="flex-1 h-8 rounded flex items-center justify-center text-xs font-medium"
+                    style={{ background: bg, color: intensity > 0.5 ? "white" : "#475569" }}
+                    title={`${day} ${TIMES_OF_DAY[ti]}: ${val.toFixed(1)}h`}>
+                    {val > 0 ? `${val.toFixed(1)}h` : ""}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+          <p className="text-xs text-slate-400 text-center mt-2">Research & Writing hours only</p>
+        </div>
+      );
+    }
+
     const emptyGoal = () => ({ id: Date.now(), title: "", category: "Research", status: "Active", deadline: "", progress: 0, notes: "", outcome: "N/A", sub_type: "General" });
-    const emptyTask = (gid) => ({ id: Date.now(), goal_id: gid, title: "", priority: "Medium", deadline: "", done: false, est_hours: "", actual_hours: 0, time_category: "Research" });
-    const DEFAULT_BUDGETS = { Research: 25, Teaching: 10, Service: 5 };
+    const emptyTask = (gid) => ({ id: Date.now(), goal_id: gid, title: "", priority: "Medium", deadline: "", done: false, est_hours: "", actual_hours: 0, time_category: "Research", week_key: getWeekKey() });
+    const emptyDiary = () => ({ id: Date.now(), date: new Date().toISOString().split("T")[0], time_of_day: `${new Date().getHours().toString().padStart(2,"0")}:00`, activity: "", category: "Research", hours: "", week_key: getWeekKey() });
+
     const POMO_WORK = 25 * 60, POMO_BREAK = 5 * 60;
 
-    // ── Auth Screen ──────────────────────────────────────────────────────────
+    // ── Auth Screen ───────────────────────────────────────────────────────────
     function AuthScreen() {
-      const [mode, setMode] = useState("login"); // login | signup | reset
+      const [mode, setMode] = useState("login");
       const [email, setEmail] = useState("");
       const [password, setPassword] = useState("");
       const [error, setError] = useState("");
@@ -99,7 +199,7 @@
         } else if (mode === "signup") {
           const { error: e } = await sb.auth.signUp({ email, password });
           if (e) setError(e.message);
-          else setMessage("Account created! Check your email to confirm, then log in.");
+          else setMessage("Account created! You can now sign in.");
         } else {
           const { error: e } = await sb.auth.resetPasswordForEmail(email);
           if (e) setError(e.message);
@@ -145,76 +245,178 @@
       );
     }
 
-    // ── Main App ─────────────────────────────────────────────────────────────
+    // ── Main App ──────────────────────────────────────────────────────────────
     function TrackerApp({ user }) {
       const [goals, setGoals] = useState([]);
       const [tasks, setTasks] = useState([]);
-      const [budgets, setBudgets] = useState(DEFAULT_BUDGETS);
+      const [archivedTasks, setArchivedTasks] = useState([]);
+      const [diaryEntries, setDiaryEntries] = useState([]);
+      const [budgets, setBudgets] = useState({ Research: 25, Teaching: 10, Service: 5 });
       const [meetings, setMeetings] = useState(0);
+      const [currentWeek, setCurrentWeek] = useState(getWeekKey());
       const [loading, setLoading] = useState(true);
       const [saving, setSaving] = useState(false);
 
       const [view, setView] = useState("goals");
       const [editGoal, setEditGoal] = useState(null);
       const [editTask, setEditTask] = useState(null);
+      const [editDiary, setEditDiary] = useState(null);
       const [showGoalForm, setShowGoalForm] = useState(false);
       const [showTaskForm, setShowTaskForm] = useState(false);
+      const [showDiaryForm, setShowDiaryForm] = useState(false);
       const [expandedGoal, setExpandedGoal] = useState(null);
+      const [underReviewCollapsed, setUnderReviewCollapsed] = useState(true);
+      const [archiveWeek, setArchiveWeek] = useState(null);
       const [copied, setCopied] = useState(false);
+      const [vizRange, setVizRange] = useState("week");
+      const [showRolloverConfirm, setShowRolloverConfirm] = useState(false);
 
-      const [pomoOpen, setPomoOpen] = useState(false);
+      // Pomodoro - fixed with useRef for reliable timing
       const [pomoMode, setPomoMode] = useState("work");
       const [pomoTime, setPomoTime] = useState(POMO_WORK);
       const [pomoRunning, setPomoRunning] = useState(false);
       const [pomoTaskId, setPomoTaskId] = useState("");
-      const [pomoElapsed, setPomoElapsed] = useState(0);
-      const pomoRef = useRef(null);
+      const [pomoOpen, setPomoOpen] = useState(false);
+      const [pomoDiaryCategory, setPomoDiaryCategory] = useState("Research");
+      const pomoStartRef = useRef(null);
+      const pomoEndRef = useRef(null);
+      const pomoIntervalRef = useRef(null);
       const pomoModeRef = useRef("work");
 
+      useEffect(() => { pomoModeRef.current = pomoMode; }, [pomoMode]);
+
+      // Reliable timer using Date.now() diff
+      const startPomo = () => {
+        pomoStartRef.current = Date.now();
+        pomoEndRef.current = Date.now() + (pomoTime * 1000);
+        setPomoRunning(true);
+      };
+      const pausePomo = () => {
+        setPomoRunning(false);
+        clearInterval(pomoIntervalRef.current);
+      };
+
+      useEffect(() => {
+        if (pomoRunning) {
+          pomoIntervalRef.current = setInterval(() => {
+            const remaining = Math.max(0, Math.round((pomoEndRef.current - Date.now()) / 1000));
+            setPomoTime(remaining);
+            if (remaining <= 0) {
+              clearInterval(pomoIntervalRef.current);
+              const next = pomoModeRef.current === "work" ? "break" : "work";
+              setPomoMode(next);
+              const nextDur = next === "break" ? POMO_BREAK : POMO_WORK;
+              setPomoTime(nextDur);
+              pomoEndRef.current = Date.now() + nextDur * 1000;
+            }
+          }, 500);
+        } else {
+          clearInterval(pomoIntervalRef.current);
+        }
+        return () => clearInterval(pomoIntervalRef.current);
+      }, [pomoRunning]);
+
+      const pomoElapsed = pomoStartRef.current ? Math.round((Date.now() - pomoStartRef.current) / 1000) : 0;
+
+      const pomoStop = async () => {
+        clearInterval(pomoIntervalRef.current);
+        setPomoRunning(false);
+        const elapsed = pomoStartRef.current ? (Date.now() - pomoStartRef.current) / 3600000 : 0;
+        if (elapsed > 0) {
+          const hrs = parseFloat(elapsed.toFixed(2));
+          // Log to task actual hours
+          if (pomoTaskId) {
+            const t = tasks.find(x => x.id === Number(pomoTaskId));
+            if (t) {
+              const newActual = parseFloat(((t.actual_hours || 0) + hrs).toFixed(2));
+              await sb.from("tasks").update({ actual_hours: newActual }).eq("id", t.id);
+              setTasks(ts => ts.map(x => x.id === t.id ? { ...x, actual_hours: newActual } : x));
+            }
+          }
+          // Auto-log to diary
+          const startHour = new Date(pomoStartRef.current).getHours();
+          const entry = {
+            id: Date.now(), user_id: user.id,
+            date: new Date().toISOString().split("T")[0],
+            time_of_day: `${String(startHour).padStart(2,"0")}:00`,
+            activity: pomoTaskId ? (tasks.find(x=>x.id===Number(pomoTaskId))?.title || "Pomodoro session") : "Pomodoro session",
+            category: pomoDiaryCategory,
+            hours: hrs,
+            week_key: getWeekKey(),
+          };
+          const { data } = await sb.from("diary_entries").insert(entry).select();
+          if (data) setDiaryEntries(de => [...de, data[0]]);
+        }
+        pomoStartRef.current = null;
+        setPomoTime(POMO_WORK);
+        setPomoMode("work");
+      };
+      const pomoReset = () => {
+        clearInterval(pomoIntervalRef.current);
+        setPomoRunning(false);
+        pomoStartRef.current = null;
+        setPomoTime(POMO_WORK);
+        setPomoMode("work");
+      };
+      const fmtTime = (s) => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
+
+      // Load data
       useEffect(() => {
         async function load() {
           setLoading(true);
-          const [{ data: g }, { data: t }, { data: s }] = await Promise.all([
-            sb.from("goals").select("*").eq("user_id", user.id),
-            sb.from("tasks").select("*").eq("user_id", user.id),
-            sb.from("settings").select("*").eq("user_id", user.id),
+          const uid = user.id;
+          const [{ data: g }, { data: t }, { data: at }, { data: de }, { data: s }] = await Promise.all([
+            sb.from("goals").select("*").eq("user_id", uid),
+            sb.from("tasks").select("*").eq("user_id", uid).eq("archived", false),
+            sb.from("tasks").select("*").eq("user_id", uid).eq("archived", true),
+            sb.from("diary_entries").select("*").eq("user_id", uid),
+            sb.from("settings").select("*").eq("user_id", uid),
           ]);
           if (g) setGoals(g);
           if (t) setTasks(t);
+          if (at) setArchivedTasks(at);
+          if (de) setDiaryEntries(de);
           if (s) {
             const b = s.find(x => x.key === "budgets");
             const m = s.find(x => x.key === "meetings");
+            const w = s.find(x => x.key === "current_week");
             if (b) setBudgets(JSON.parse(b.value));
             if (m) setMeetings(parseFloat(m.value) || 0);
+            if (w) setCurrentWeek(w.value);
           }
           setLoading(false);
         }
         load();
       }, [user.id]);
 
-      useEffect(() => { pomoModeRef.current = pomoMode; }, [pomoMode]);
-      useEffect(() => {
-        if (pomoRunning) {
-          pomoRef.current = setInterval(() => {
-            setPomoTime(t => {
-              if (t <= 1) {
-                const next = pomoModeRef.current === "work" ? "break" : "work";
-                setPomoMode(next);
-                return next === "break" ? POMO_BREAK : POMO_WORK;
-              }
-              return t - 1;
-            });
-            setPomoElapsed(e => e + 1);
-          }, 1000);
-        } else { clearInterval(pomoRef.current); }
-        return () => clearInterval(pomoRef.current);
-      }, [pomoRunning]);
-
       const saveSetting = async (key, value) => {
         await sb.from("settings").upsert({ key, value: String(value), user_id: user.id }, { onConflict: "key,user_id" });
       };
       const updateBudgets = async (b) => { setBudgets(b); await saveSetting("budgets", JSON.stringify(b)); };
       const updateMeetings = async (m) => { setMeetings(m); await saveSetting("meetings", m); };
+
+      // Weekly rollover
+      const doRollover = async () => {
+        setSaving(true);
+        const newWeek = getWeekKey();
+        // Archive done tasks
+        const doneTasks = tasks.filter(t => t.done);
+        if (doneTasks.length > 0) {
+          await sb.from("tasks").update({ archived: true }).in("id", doneTasks.map(t => t.id));
+          setArchivedTasks(at => [...at, ...doneTasks.map(t => ({ ...t, archived: true }))]);
+        }
+        // Roll over undone tasks to new week
+        const undoneTasks = tasks.filter(t => !t.done);
+        if (undoneTasks.length > 0) {
+          await sb.from("tasks").update({ week_key: newWeek }).in("id", undoneTasks.map(t => t.id));
+        }
+        setTasks(undoneTasks.map(t => ({ ...t, week_key: newWeek })));
+        setCurrentWeek(newWeek);
+        await saveSetting("current_week", newWeek);
+        await updateMeetings(0);
+        setShowRolloverConfirm(false);
+        setSaving(false);
+      };
 
       const saveGoal = async (g) => {
         setSaving(true);
@@ -230,7 +432,7 @@
       };
       const saveTask = async (t) => {
         setSaving(true);
-        const row = { id: t.id, user_id: user.id, goal_id: t.goal_id || null, title: t.title, priority: t.priority, deadline: t.deadline || null, done: t.done, est_hours: t.est_hours ? parseFloat(t.est_hours) : null, actual_hours: parseFloat(t.actual_hours) || 0, time_category: t.time_category };
+        const row = { id: t.id, user_id: user.id, goal_id: t.goal_id || null, title: t.title, priority: t.priority, deadline: t.deadline || null, done: t.done, est_hours: t.est_hours ? parseFloat(t.est_hours) : null, actual_hours: parseFloat(t.actual_hours) || 0, time_category: t.time_category, week_key: t.week_key || getWeekKey(), archived: false };
         const { data } = await sb.from("tasks").upsert(row, { onConflict: "id" }).select();
         if (data) setTasks(ts => ts.find(x => x.id === t.id) ? ts.map(x => x.id === t.id ? data[0] : x) : [...ts, data[0]]);
         setSaving(false); setShowTaskForm(false); setEditTask(null);
@@ -242,26 +444,67 @@
       const toggleTask = async (id) => {
         const t = tasks.find(x => x.id === id);
         if (!t) return;
-        const updated = { ...t, done: !t.done };
-        await sb.from("tasks").update({ done: updated.done }).eq("id", id);
-        setTasks(ts => ts.map(x => x.id === id ? updated : x));
+        await sb.from("tasks").update({ done: !t.done }).eq("id", id);
+        setTasks(ts => ts.map(x => x.id === id ? { ...x, done: !x.done } : x));
       };
-      const pomoStop = async () => {
-        setPomoRunning(false);
-        if (pomoTaskId && pomoElapsed > 0) {
-          const hrs = parseFloat((pomoElapsed / 3600).toFixed(2));
-          const t = tasks.find(x => x.id === Number(pomoTaskId));
-          if (t) {
-            const newActual = parseFloat(((t.actual_hours || 0) + hrs).toFixed(2));
-            await sb.from("tasks").update({ actual_hours: newActual }).eq("id", t.id);
-            setTasks(ts => ts.map(x => x.id === t.id ? { ...x, actual_hours: newActual } : x));
-          }
-        }
-        setPomoElapsed(0); setPomoTime(POMO_WORK); setPomoMode("work");
-      };
-      const pomoReset = () => { setPomoRunning(false); setPomoTime(POMO_WORK); setPomoMode("work"); setPomoElapsed(0); };
-      const fmtTime = (s) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
+      const saveDiary = async (e) => {
+        setSaving(true);
+        const row = { id: e.id, user_id: user.id, date: e.date, time_of_day: e.time_of_day, activity: e.activity, category: e.category, hours: parseFloat(e.hours) || 0, week_key: e.week_key || getWeekKey() };
+        const { data } = await sb.from("diary_entries").upsert(row, { onConflict: "id" }).select();
+        if (data) setDiaryEntries(de => de.find(x => x.id === e.id) ? de.map(x => x.id === e.id ? data[0] : x) : [...de, data[0]]);
+        setSaving(false); setShowDiaryForm(false); setEditDiary(null);
+      };
+      const deleteDiary = async (id) => {
+        await sb.from("diary_entries").delete().eq("id", id);
+        setDiaryEntries(de => de.filter(e => e.id !== id));
+      };
+
+      // Diary timer state
+      const [diaryTimerRunning, setDiaryTimerRunning] = useState(false);
+      const [diaryTimerStart, setDiaryTimerStart] = useState(null);
+      const [diaryTimerActivity, setDiaryTimerActivity] = useState("");
+      const [diaryTimerCategory, setDiaryTimerCategory] = useState("Research");
+      const [diaryTimerElapsed, setDiaryTimerElapsed] = useState(0);
+      const diaryTimerRef = useRef(null);
+
+      useEffect(() => {
+        if (diaryTimerRunning) {
+          diaryTimerRef.current = setInterval(() => {
+            setDiaryTimerElapsed(Math.round((Date.now() - diaryTimerStart) / 1000));
+          }, 1000);
+        } else { clearInterval(diaryTimerRef.current); }
+        return () => clearInterval(diaryTimerRef.current);
+      }, [diaryTimerRunning, diaryTimerStart]);
+
+      const startDiaryTimer = () => {
+        const now = Date.now();
+        setDiaryTimerStart(now);
+        setDiaryTimerElapsed(0);
+        setDiaryTimerRunning(true);
+      };
+      const stopDiaryTimer = async () => {
+        setDiaryTimerRunning(false);
+        const hrs = parseFloat((diaryTimerElapsed / 3600).toFixed(2));
+        if (hrs > 0 && diaryTimerActivity) {
+          const startHour = new Date(diaryTimerStart).getHours();
+          const entry = {
+            id: Date.now(), user_id: user.id,
+            date: new Date().toISOString().split("T")[0],
+            time_of_day: `${String(startHour).padStart(2,"0")}:00`,
+            activity: diaryTimerActivity,
+            category: diaryTimerCategory,
+            hours: hrs,
+            week_key: getWeekKey(),
+          };
+          const { data } = await sb.from("diary_entries").insert(entry).select();
+          if (data) setDiaryEntries(de => [...de, data[0]]);
+        }
+        setDiaryTimerElapsed(0);
+        setDiaryTimerActivity("");
+      };
+
+      // Time bank calcs
       const totalBudget = Object.values(budgets).reduce((a, b) => a + b, 0);
       const availableTotal = Math.max(0, totalBudget - meetings);
       const meetingRatio = totalBudget > 0 ? meetings / totalBudget : 0;
@@ -277,6 +520,18 @@
         }
       });
 
+      // Diary calcs
+      const weekEntries = diaryEntries.filter(e => e.week_key === currentWeek);
+      const vizEntries = vizRange === "week" ? weekEntries : diaryEntries;
+      const diaryTotals = {};
+      DIARY_CATS.forEach(c => { diaryTotals[c] = 0; });
+      vizEntries.forEach(e => { if (diaryTotals[e.category] !== undefined) diaryTotals[e.category] += parseFloat(e.hours || 0); });
+      const pieData = DIARY_CATS.map(c => ({ label: c, value: diaryTotals[c], color: diaryColors[c] })).filter(d => d.value > 0);
+
+      // Archive weeks
+      const archiveWeeks = [...new Set(archivedTasks.map(t => t.week_key))].sort().reverse();
+
+      // Summary
       const generateSummary = () => {
         let out = `ACADEMIC SEMESTER SUMMARY\n${new Date().getFullYear()} Semester\nGenerated: ${new Date().toLocaleDateString()}\n${"=".repeat(50)}\n\n`;
         ["Research","Teaching","Service"].forEach(cat => {
@@ -286,54 +541,50 @@
           const est = parseFloat(estByCategory[cat].toFixed(1));
           out += `${cat.toUpperCase()}\n${"─".repeat(30)}\n`;
           out += `Tasks completed: ${catTasks.filter(t=>t.done).length}/${catTasks.length}  |  Hours: ${act} actual / ${est} estimated\n\n`;
-          const accepted = catGoals.filter(g => g.outcome === "Accepted");
-          if (accepted.length) { out += `✓ ACCEPTED:\n`; accepted.forEach(g => out += `  • ${g.title}${g.sub_type !== "General" ? ` [${g.sub_type}]` : ""}\n`); out += "\n"; }
-          const revise = catGoals.filter(g => g.outcome === "Revise & Resubmit");
-          if (revise.length) { out += `↻ REVISE & RESUBMIT:\n`; revise.forEach(g => out += `  • ${g.title}${g.sub_type !== "General" ? ` [${g.sub_type}]` : ""}\n`); out += "\n"; }
-          const review = catGoals.filter(g => g.outcome === "Under Review");
-          if (review.length) { out += `⟳ UNDER REVIEW:\n`; review.forEach(g => out += `  • ${g.title}${g.sub_type !== "General" ? ` [${g.sub_type}]` : ""}\n`); out += "\n"; }
-          const done = catGoals.filter(g => g.status === "Done" && g.outcome === "N/A");
-          if (done.length) { out += `✓ COMPLETED:\n`; done.forEach(g => out += `  • ${g.title}\n`); out += "\n"; }
-          const rejected = catGoals.filter(g => g.outcome === "Rejected" || g.status === "Rejected/Redirected");
-          if (rejected.length) { out += `✗ REJECTED/REDIRECTED:\n`; rejected.forEach(g => out += `  • ${g.title}${g.notes ? ` — ${g.notes}` : ""}\n`); out += "\n"; }
-          const active = catGoals.filter(g => g.status === "Active");
-          if (active.length) { out += `→ IN PROGRESS:\n`; active.forEach(g => out += `  • ${g.title} (${g.progress}%)\n`); out += "\n"; }
+          const groups = [
+            ["✓ ACCEPTED", catGoals.filter(g=>g.outcome==="Accepted")],
+            ["↻ REVISE & RESUBMIT", catGoals.filter(g=>g.outcome==="Revise & Resubmit")],
+            ["⟳ UNDER REVIEW", catGoals.filter(g=>g.outcome==="Under Review")],
+            ["✓ COMPLETED", catGoals.filter(g=>g.status==="Done"&&g.outcome==="N/A")],
+            ["✗ REJECTED/REDIRECTED", catGoals.filter(g=>g.outcome==="Rejected"||g.status==="Rejected/Redirected")],
+            ["→ IN PROGRESS", catGoals.filter(g=>g.status==="Active")],
+          ];
+          groups.forEach(([label, gs]) => {
+            if (gs.length) { out += `${label}:\n`; gs.forEach(g => out += `  • ${g.title}${g.sub_type!=="General"?` [${g.sub_type}]`:""}\n`); out += "\n"; }
+          });
           out += "\n";
         });
         out += `OVERALL\n${"─".repeat(30)}\n`;
         out += `Goals: ${goals.filter(g=>g.status==="Done").length}/${goals.length} completed  |  Accepted: ${goals.filter(g=>g.outcome==="Accepted").length}\n`;
         out += `Tasks: ${tasks.filter(t=>t.done).length}/${tasks.length} completed\n`;
-        out += `Total hours (actual): ${Object.values(actByCategory).reduce((a,b)=>a+b,0).toFixed(1)}\n`;
         return out;
       };
-      const copyToClipboard = () => {
-        navigator.clipboard.writeText(generateSummary()).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
-      };
 
-      const activeGoals = goals.filter(g => g.status === "Active");
+      const activeGoals = goals.filter(g => g.status === "Active" && g.outcome !== "Under Review");
+      const underReviewGoals = goals.filter(g => g.outcome === "Under Review");
       const doneTasks = tasks.filter(t => t.done).length;
 
       if (loading) return (
         <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-          <div className="text-center text-slate-400"><div className="text-4xl mb-3">🎓</div><p>Loading your data...</p></div>
+          <div className="text-center text-slate-400"><div className="text-4xl mb-3">🎓</div><p>Loading...</p></div>
         </div>
       );
 
       return (
-        <div className="min-h-screen bg-slate-50 font-sans">
+        <div className="min-h-screen bg-slate-50 font-sans pb-20">
           {saving && <div className="fixed top-4 right-4 bg-slate-800 text-white text-xs px-3 py-1.5 rounded-full z-50">Saving...</div>}
 
-          <div className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+          <div className="bg-white border-b border-slate-200 px-4 py-4 flex items-center justify-between flex-wrap gap-2">
             <div>
               <h1 className="text-xl font-semibold text-slate-800">Academic Goal Tracker</h1>
-              <p className="text-sm text-slate-400">Semester planner · Weekly focus · Time bank</p>
+              <p className="text-xs text-slate-400">Week of {currentWeek}</p>
             </div>
-            <div className="flex items-center gap-3">
-              <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
-                {["goals","weekly","timebank","summary"].map(v => (
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex gap-1 bg-slate-100 rounded-lg p-1 flex-wrap">
+                {["goals","weekly","timebank","diary","archive","summary"].map(v => (
                   <button key={v} onClick={() => setView(v)}
-                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all ${view === v ? "bg-white shadow text-slate-800" : "text-slate-500 hover:text-slate-700"}`}>
-                    {v === "goals" ? "Semester Goals" : v === "weekly" ? "Weekly Tasks" : v === "timebank" ? "Time Bank" : "Summary"}
+                    className={`px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${view === v ? "bg-white shadow text-slate-800" : "text-slate-500 hover:text-slate-700"}`}>
+                    {v === "goals" ? "Goals" : v === "weekly" ? "Weekly" : v === "timebank" ? "Time Bank" : v === "diary" ? "Time Diary" : v === "archive" ? "Archive" : "Summary"}
                   </button>
                 ))}
               </div>
@@ -341,13 +592,14 @@
             </div>
           </div>
 
-          <div className="max-w-4xl mx-auto px-6 py-6">
+          <div className="max-w-4xl mx-auto px-4 py-6">
+            {/* Stats */}
             <div className="grid grid-cols-4 gap-3 mb-6">
               {[
                 { label: "Total Goals", val: goals.length, color: "text-slate-700" },
                 { label: "Active", val: activeGoals.length, color: "text-emerald-600" },
-                { label: "Done", val: goals.filter(g => g.status === "Done").length, color: "text-blue-600" },
-                { label: "Tasks This Week", val: `${doneTasks}/${tasks.length}`, color: "text-orange-600" },
+                { label: "Under Review", val: underReviewGoals.length, color: "text-blue-600" },
+                { label: "Tasks Done", val: `${doneTasks}/${tasks.length}`, color: "text-orange-600" },
               ].map(s => (
                 <div key={s.label} className="bg-white rounded-xl border border-slate-200 p-4">
                   <div className={`text-2xl font-bold ${s.color}`}>{s.val}</div>
@@ -356,75 +608,48 @@
               ))}
             </div>
 
+            {/* GOALS */}
             {view === "goals" && (
               <div>
                 <div className="flex justify-between items-center mb-4">
                   <h2 className="text-lg font-semibold text-slate-700">Semester Goals</h2>
                   <button onClick={() => { setEditGoal(emptyGoal()); setShowGoalForm(true); }} className="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-700">+ Add Goal</button>
                 </div>
-                {goals.length === 0 && <div className="text-center py-16 text-slate-400"><div className="text-4xl mb-3">🎓</div><p>No goals yet.</p></div>}
+                {goals.filter(g => g.outcome !== "Under Review").length === 0 && <div className="text-center py-12 text-slate-400"><div className="text-4xl mb-3">🎓</div><p>No goals yet.</p></div>}
                 <div className="space-y-3">
-                  {goals.map(g => (
-                    <div key={g.id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                      <div className="p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-medium text-slate-800">{g.title || "Untitled"}</span>
-                              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColors[g.status]}`}>{g.status}</span>
-                              {g.sub_type !== "General" && <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{g.sub_type}</span>}
-                              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${outcomeColors[g.outcome || "N/A"]}`}>{g.outcome || "N/A"}</span>
-                              <DeadlineBadge date={g.deadline} />
-                            </div>
-                            <div className="mt-3 flex items-center gap-3">
-                              <div className="flex-1 bg-slate-100 rounded-full h-2">
-                                <div className="bg-emerald-500 h-2 rounded-full transition-all" style={{ width: `${g.progress}%` }} />
-                              </div>
-                              <span className="text-xs text-slate-400 w-8">{g.progress}%</span>
-                            </div>
-                            {g.notes && <p className="text-sm text-slate-500 mt-2 italic">{g.notes}</p>}
-                          </div>
-                          <div className="flex gap-1 shrink-0">
-                            <button onClick={() => setExpandedGoal(expandedGoal === g.id ? null : g.id)} className="p-1.5 text-slate-400 hover:text-slate-600 text-xs">{expandedGoal === g.id ? "▲" : "▼"}</button>
-                            <button onClick={() => { setEditGoal(g); setShowGoalForm(true); }} className="p-1.5 text-slate-400 hover:text-slate-600">✏️</button>
-                            <button onClick={() => deleteGoal(g.id)} className="p-1.5 text-slate-400 hover:text-red-500">🗑</button>
-                          </div>
-                        </div>
-                      </div>
-                      {expandedGoal === g.id && (
-                        <div className="border-t border-slate-100 bg-slate-50 px-4 py-3">
-                          <div className="flex justify-between items-center mb-2">
-                            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Linked Tasks</span>
-                            <button onClick={() => { setEditTask(emptyTask(g.id)); setShowTaskForm(true); }} className="text-xs text-slate-500 hover:text-slate-800 border border-slate-300 px-2 py-1 rounded-md">+ Task</button>
-                          </div>
-                          {tasks.filter(t => t.goal_id === g.id).length === 0 && <p className="text-xs text-slate-400">No tasks yet.</p>}
-                          {tasks.filter(t => t.goal_id === g.id).map(t => (
-                            <div key={t.id} className="flex items-center gap-2 py-1.5">
-                              <input type="checkbox" checked={t.done} onChange={() => toggleTask(t.id)} className="rounded" />
-                              <span className={`flex-1 text-sm ${t.done ? "line-through text-slate-400" : "text-slate-700"}`}>{t.title}</span>
-                              <span className={`text-xs px-2 py-0.5 rounded-full ${priorityColors[t.priority]}`}>{t.priority}</span>
-                              {t.est_hours && <span className="text-xs text-slate-400">Est: {t.est_hours}h</span>}
-                              {t.actual_hours > 0 && <span className="text-xs text-emerald-600">Act: {t.actual_hours}h</span>}
-                              <DeadlineBadge date={t.deadline} />
-                              <button onClick={() => { setEditTask(t); setShowTaskForm(true); }} className="text-slate-300 hover:text-slate-500 text-xs">✏️</button>
-                              <button onClick={() => deleteTask(t.id)} className="text-slate-300 hover:text-red-400 text-xs">✕</button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                  {goals.filter(g => g.outcome !== "Under Review").map(g => <GoalCard key={g.id} g={g} tasks={tasks} expandedGoal={expandedGoal} setExpandedGoal={setExpandedGoal} setEditGoal={setEditGoal} setShowGoalForm={setShowGoalForm} deleteGoal={deleteGoal} setEditTask={setEditTask} setShowTaskForm={setShowTaskForm} toggleTask={toggleTask} deleteTask={deleteTask} priorityColors={priorityColors} outcomeColors={outcomeColors} />)}
                 </div>
+
+                {/* Under Review section */}
+                {underReviewGoals.length > 0 && (
+                  <div className="mt-6">
+                    <button onClick={() => setUnderReviewCollapsed(c => !c)}
+                      className="w-full flex items-center justify-between bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-sm font-medium text-blue-700 hover:bg-blue-100">
+                      <span>⟳ Under Review ({underReviewGoals.length})</span>
+                      <span>{underReviewCollapsed ? "▼ Show" : "▲ Hide"}</span>
+                    </button>
+                    {!underReviewCollapsed && (
+                      <div className="space-y-2 mt-2">
+                        {underReviewGoals.map(g => <GoalCard key={g.id} g={g} tasks={tasks} expandedGoal={expandedGoal} setExpandedGoal={setExpandedGoal} setEditGoal={setEditGoal} setShowGoalForm={setShowGoalForm} deleteGoal={deleteGoal} setEditTask={setEditTask} setShowTaskForm={setShowTaskForm} toggleTask={toggleTask} deleteTask={deleteTask} priorityColors={priorityColors} outcomeColors={outcomeColors} />)}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
+            {/* WEEKLY */}
             {view === "weekly" && (
               <div>
                 <div className="flex justify-between items-center mb-4">
                   <h2 className="text-lg font-semibold text-slate-700">Weekly Tasks</h2>
-                  <button onClick={() => { setEditTask(emptyTask(activeGoals[0]?.id || null)); setShowTaskForm(true); }} className="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-700">+ Add Task</button>
+                  <div className="flex gap-2">
+                    <button onClick={() => setShowRolloverConfirm(true)}
+                      className="border border-slate-300 text-slate-600 px-3 py-2 rounded-lg text-sm font-medium hover:bg-slate-50">📅 New Week</button>
+                    <button onClick={() => { setEditTask(emptyTask(null)); setShowTaskForm(true); }} className="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-700">+ Add Task</button>
+                  </div>
                 </div>
-                {tasks.length === 0 && <div className="text-center py-16 text-slate-400"><div className="text-4xl mb-3">📋</div><p>No tasks yet.</p></div>}
+                {tasks.length === 0 && <div className="text-center py-12 text-slate-400"><div className="text-4xl mb-3">📋</div><p>No tasks yet.</p></div>}
                 {["High","Medium","Low"].map(p => {
                   const pts = tasks.filter(t => t.priority === p);
                   if (!pts.length) return null;
@@ -441,7 +666,7 @@
                               <div className="flex-1 min-w-0">
                                 <span className={`text-sm font-medium ${t.done ? "line-through text-slate-400" : "text-slate-800"}`}>{t.title || "Untitled"}</span>
                                 {goal && <span className="ml-2 text-xs text-slate-400">← {goal.title}</span>}
-                                <div className="flex gap-3 mt-1">
+                                <div className="flex gap-3 mt-1 flex-wrap">
                                   {t.est_hours && <span className="text-xs text-slate-400">Est: {t.est_hours}h</span>}
                                   {t.actual_hours > 0 && <span className={`text-xs font-medium ${over ? "text-red-500" : "text-emerald-600"}`}>Act: {t.actual_hours}h {over ? "⚠️" : ""}</span>}
                                   {t.time_category && <span className={`text-xs px-1.5 py-0.5 rounded-full ${timeCatColors[t.time_category]}`}>{t.time_category}</span>}
@@ -460,65 +685,163 @@
               </div>
             )}
 
+            {/* TIME BANK */}
             {view === "timebank" && (
               <div>
                 <h2 className="text-lg font-semibold text-slate-700 mb-4">Time Bank</h2>
                 <div className="bg-white border border-slate-200 rounded-xl p-4 mb-4">
                   <div className="flex items-center justify-between">
-                    <div>
-                      <p className="font-medium text-slate-700">Meetings this week</p>
-                      <p className="text-xs text-slate-400">Deducted proportionally from all categories</p>
-                    </div>
+                    <div><p className="font-medium text-slate-700">Meetings this week</p><p className="text-xs text-slate-400">Deducted proportionally</p></div>
                     <div className="flex items-center gap-2">
-                      <input type="number" min="0" step="0.5" value={meetings} onChange={e => updateMeetings(parseFloat(e.target.value) || 0)} className="w-20 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-center" />
+                      <input type="number" min="0" step="0.5" value={meetings} onChange={e => updateMeetings(parseFloat(e.target.value)||0)} className="w-20 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-center" />
                       <span className="text-sm text-slate-500">hrs</span>
                     </div>
                   </div>
-                  <div className="mt-2 text-sm text-slate-500">
-                    Total budget: <span className="font-medium text-slate-700">{totalBudget}h</span> &nbsp;·&nbsp; After meetings: <span className="font-medium text-emerald-600">{availableTotal}h available</span>
-                  </div>
+                  <div className="mt-2 text-sm text-slate-500">Total: <span className="font-medium text-slate-700">{totalBudget}h</span> · Available: <span className="font-medium text-emerald-600">{availableTotal}h</span></div>
                 </div>
-                <div className="space-y-3 mb-4">
+                <div className="space-y-3">
                   {TIME_CATS.map(c => {
                     const avail = available[c];
                     const est = parseFloat(estByCategory[c].toFixed(1));
                     const act = parseFloat(actByCategory[c].toFixed(1));
-                    const estPct = avail > 0 ? Math.min(100, (est / avail) * 100) : 0;
-                    const actPct = avail > 0 ? Math.min(100, (act / avail) * 100) : 0;
                     const surplus = parseFloat((avail - act).toFixed(1));
                     return (
                       <div key={c} className="bg-white border border-slate-200 rounded-xl p-4">
                         <div className="flex items-center justify-between mb-3">
                           <div className="flex items-center gap-2">
                             <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${timeCatColors[c]}`}>{c}</span>
-                            <span className="text-sm text-slate-500">Budget:</span>
-                            <input type="number" min="0" value={budgets[c]} onChange={e => updateBudgets({ ...budgets, [c]: parseFloat(e.target.value) || 0 })} className="w-16 border border-slate-200 rounded-lg px-2 py-1 text-sm text-center" />
-                            <span className="text-xs text-slate-400">hrs</span>
+                            <input type="number" min="0" value={budgets[c]} onChange={e => updateBudgets({...budgets,[c]:parseFloat(e.target.value)||0})} className="w-16 border border-slate-200 rounded-lg px-2 py-1 text-sm text-center" />
+                            <span className="text-xs text-slate-400">hrs budget</span>
                           </div>
-                          <span className="text-sm font-medium text-slate-700">Available: {avail}h</span>
+                          <span className="text-sm font-medium text-slate-700">Avail: {avail}h</span>
                         </div>
                         <div className="mb-1">
                           <div className="flex justify-between text-xs text-slate-400 mb-1"><span>Estimated</span><span>{est}h / {avail}h</span></div>
-                          <div className="bg-slate-100 rounded-full h-2"><div className="bg-violet-400 h-2 rounded-full" style={{ width: `${estPct}%` }} /></div>
+                          <div className="bg-slate-100 rounded-full h-2"><div className="bg-violet-400 h-2 rounded-full" style={{width:`${avail>0?Math.min(100,(est/avail)*100):0}%`}} /></div>
                         </div>
                         <div className="mb-2">
                           <div className="flex justify-between text-xs text-slate-400 mb-1"><span>Actual</span><span>{act}h / {avail}h</span></div>
-                          <div className="bg-slate-100 rounded-full h-2"><div className={`h-2 rounded-full ${act > avail ? "bg-red-400" : "bg-emerald-400"}`} style={{ width: `${actPct}%` }} /></div>
+                          <div className="bg-slate-100 rounded-full h-2"><div className={`h-2 rounded-full ${act>avail?"bg-red-400":"bg-emerald-400"}`} style={{width:`${avail>0?Math.min(100,(act/avail)*100):0}%`}} /></div>
                         </div>
-                        <div className={`text-xs font-medium ${surplus >= 0 ? "text-emerald-600" : "text-red-500"}`}>{surplus >= 0 ? `+${surplus}h surplus` : `${surplus}h deficit`}</div>
+                        <div className={`text-xs font-medium ${surplus>=0?"text-emerald-600":"text-red-500"}`}>{surplus>=0?`+${surplus}h surplus`:`${surplus}h deficit`}</div>
                       </div>
                     );
                   })}
                 </div>
-                <div className="bg-slate-100 rounded-xl p-3 text-xs text-slate-500 text-center">Estimates and actuals are pulled from your weekly tasks.</div>
               </div>
             )}
 
+            {/* TIME DIARY */}
+            {view === "diary" && (
+              <div>
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-lg font-semibold text-slate-700">Time Diary</h2>
+                  <button onClick={() => { setEditDiary(emptyDiary()); setShowDiaryForm(true); }} className="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-700">+ Log Entry</button>
+                </div>
+
+                {/* Quick timer */}
+                <div className="bg-white border border-slate-200 rounded-xl p-4 mb-4">
+                  <p className="text-sm font-medium text-slate-700 mb-3">⏱ Quick Timer</p>
+                  <div className="flex gap-2 mb-3">
+                    <input type="text" placeholder="What are you working on?" value={diaryTimerActivity} onChange={e => setDiaryTimerActivity(e.target.value)}
+                      className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+                    <select value={diaryTimerCategory} onChange={e => setDiaryTimerCategory(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-2 text-sm">
+                      {DIARY_CATS.map(c => <option key={c}>{c}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {diaryTimerRunning
+                      ? <button onClick={stopDiaryTimer} className="bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-emerald-600">⏹ Stop & Log</button>
+                      : <button onClick={startDiaryTimer} disabled={!diaryTimerActivity} className="bg-red-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-red-600 disabled:opacity-40">▶ Start</button>
+                    }
+                    {diaryTimerRunning && <span className="font-mono text-lg font-bold text-slate-700">{fmtTime(diaryTimerElapsed)}</span>}
+                  </div>
+                </div>
+
+                {/* Pie chart */}
+                <div className="bg-white border border-slate-200 rounded-xl p-4 mb-4">
+                  <div className="flex justify-between items-center mb-3">
+                    <p className="text-sm font-medium text-slate-700">Time Distribution</p>
+                    <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
+                      {["week","semester"].map(r => (
+                        <button key={r} onClick={() => setVizRange(r)} className={`px-3 py-1 rounded-md text-xs font-medium ${vizRange===r?"bg-white shadow text-slate-800":"text-slate-500"}`}>
+                          {r === "week" ? "This Week" : "Semester"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <PieChart data={pieData} />
+                </div>
+
+                {/* Heatmap */}
+                <div className="bg-white border border-slate-200 rounded-xl p-4 mb-4">
+                  <p className="text-sm font-medium text-slate-700 mb-3">Productivity Heatmap</p>
+                  <Heatmap entries={vizRange === "week" ? weekEntries : diaryEntries} />
+                </div>
+
+                {/* Diary entries */}
+                <div className="space-y-2">
+                  {[...diaryEntries].sort((a,b) => new Date(b.date) - new Date(a.date)).slice(0,50).map(e => (
+                    <div key={e.id} className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <span className="text-sm font-medium text-slate-800">{e.activity}</span>
+                        <div className="flex gap-2 mt-0.5 flex-wrap">
+                          <span className="text-xs text-slate-400">{e.date} {e.time_of_day}</span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded-full ${timeCatColors[e.category]}`}>{e.category}</span>
+                          <span className="text-xs font-medium text-slate-600">{e.hours}h</span>
+                        </div>
+                      </div>
+                      <button onClick={() => { setEditDiary(e); setShowDiaryForm(true); }} className="text-slate-300 hover:text-slate-500">✏️</button>
+                      <button onClick={() => deleteDiary(e.id)} className="text-slate-300 hover:text-red-400">✕</button>
+                    </div>
+                  ))}
+                  {diaryEntries.length === 0 && <div className="text-center py-8 text-slate-400 text-sm">No diary entries yet.</div>}
+                </div>
+              </div>
+            )}
+
+            {/* ARCHIVE */}
+            {view === "archive" && (
+              <div>
+                <h2 className="text-lg font-semibold text-slate-700 mb-4">Task Archive</h2>
+                {archiveWeeks.length === 0 && <div className="text-center py-12 text-slate-400"><div className="text-4xl mb-3">📦</div><p>No archived tasks yet.</p></div>}
+                <div className="space-y-3">
+                  {archiveWeeks.map(wk => {
+                    const wkTasks = archivedTasks.filter(t => t.week_key === wk);
+                    const isOpen = archiveWeek === wk;
+                    return (
+                      <div key={wk} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                        <button onClick={() => setArchiveWeek(isOpen ? null : wk)}
+                          className="w-full flex justify-between items-center px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                          <span>Week of {wk}</span>
+                          <span className="text-xs text-slate-400">{wkTasks.length} tasks {isOpen ? "▲" : "▼"}</span>
+                        </button>
+                        {isOpen && (
+                          <div className="border-t border-slate-100 px-4 py-3 space-y-2">
+                            {wkTasks.map(t => (
+                              <div key={t.id} className="flex items-center gap-2 text-sm">
+                                <span className="text-emerald-500">✓</span>
+                                <span className="flex-1 text-slate-600 line-through">{t.title}</span>
+                                {t.actual_hours > 0 && <span className="text-xs text-slate-400">{t.actual_hours}h</span>}
+                                <span className={`text-xs px-1.5 py-0.5 rounded-full ${timeCatColors[t.time_category]}`}>{t.time_category}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* SUMMARY */}
             {view === "summary" && (
               <div>
                 <div className="flex justify-between items-center mb-4">
                   <h2 className="text-lg font-semibold text-slate-700">Semester Summary</h2>
-                  <button onClick={copyToClipboard} className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition-all ${copied ? "bg-emerald-500" : "bg-slate-800 hover:bg-slate-700"}`}>
+                  <button onClick={() => { navigator.clipboard.writeText(generateSummary()).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000);}); }}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium text-white ${copied?"bg-emerald-500":"bg-slate-800 hover:bg-slate-700"}`}>
                     {copied ? "✓ Copied!" : "Copy to Clipboard"}
                   </button>
                 </div>
@@ -527,27 +850,29 @@
                   const catTasks = tasks.filter(t => t.time_category === cat);
                   const act = parseFloat(actByCategory[cat].toFixed(1));
                   const est = parseFloat(estByCategory[cat].toFixed(1));
-                  const accepted = catGoals.filter(g => g.outcome === "Accepted");
-                  const inReview = catGoals.filter(g => g.outcome === "Under Review");
-                  const revise = catGoals.filter(g => g.outcome === "Revise & Resubmit");
-                  const completed = catGoals.filter(g => g.status === "Done" && g.outcome === "N/A");
-                  const rejected = catGoals.filter(g => g.outcome === "Rejected" || g.status === "Rejected/Redirected");
-                  const active = catGoals.filter(g => g.status === "Active");
+                  const groups = [
+                    ["✓ Accepted", "text-emerald-700", catGoals.filter(g=>g.outcome==="Accepted")],
+                    ["↻ Revise & Resubmit", "text-yellow-700", catGoals.filter(g=>g.outcome==="Revise & Resubmit")],
+                    ["⟳ Under Review", "text-blue-700", catGoals.filter(g=>g.outcome==="Under Review")],
+                    ["✓ Completed", "text-slate-600", catGoals.filter(g=>g.status==="Done"&&g.outcome==="N/A")],
+                    ["✗ Rejected/Redirected", "text-red-600", catGoals.filter(g=>g.outcome==="Rejected"||g.status==="Rejected/Redirected")],
+                    ["→ In Progress", "text-slate-400", catGoals.filter(g=>g.status==="Active")],
+                  ];
                   return (
                     <div key={cat} className="bg-white border border-slate-200 rounded-xl p-5 mb-4">
                       <div className="flex items-center justify-between mb-3">
                         <h3 className="font-semibold text-slate-800">{cat}</h3>
                         <div className="flex gap-3 text-xs text-slate-500">
-                          <span>Tasks: <strong className="text-slate-700">{catTasks.filter(t=>t.done).length}/{catTasks.length}</strong></span>
-                          <span>Hours: <strong className="text-slate-700">{act}h / {est}h est</strong></span>
+                          <span>Tasks: <strong>{catTasks.filter(t=>t.done).length}/{catTasks.length}</strong></span>
+                          <span>Hours: <strong>{act}h / {est}h est</strong></span>
                         </div>
                       </div>
-                      {accepted.length > 0 && <div className="mb-3"><div className="text-xs font-semibold text-emerald-700 mb-1">✓ Accepted</div>{accepted.map(g => <div key={g.id} className="text-sm text-slate-700 ml-3">• {g.title}{g.sub_type !== "General" ? <span className="ml-1 text-xs text-slate-400">[{g.sub_type}]</span> : ""}</div>)}</div>}
-                      {revise.length > 0 && <div className="mb-3"><div className="text-xs font-semibold text-yellow-700 mb-1">↻ Revise & Resubmit</div>{revise.map(g => <div key={g.id} className="text-sm text-slate-700 ml-3">• {g.title}{g.sub_type !== "General" ? <span className="ml-1 text-xs text-slate-400">[{g.sub_type}]</span> : ""}</div>)}</div>}
-                      {inReview.length > 0 && <div className="mb-3"><div className="text-xs font-semibold text-blue-700 mb-1">⟳ Under Review</div>{inReview.map(g => <div key={g.id} className="text-sm text-slate-700 ml-3">• {g.title}{g.sub_type !== "General" ? <span className="ml-1 text-xs text-slate-400">[{g.sub_type}]</span> : ""}</div>)}</div>}
-                      {completed.length > 0 && <div className="mb-3"><div className="text-xs font-semibold text-slate-600 mb-1">✓ Completed</div>{completed.map(g => <div key={g.id} className="text-sm text-slate-700 ml-3">• {g.title}</div>)}</div>}
-                      {rejected.length > 0 && <div className="mb-3"><div className="text-xs font-semibold text-red-600 mb-1">✗ Rejected / Redirected</div>{rejected.map(g => <div key={g.id} className="text-sm text-slate-700 ml-3">• {g.title}{g.notes ? <span className="text-xs text-slate-400 ml-1">— {g.notes}</span> : ""}</div>)}</div>}
-                      {active.length > 0 && <div className="mb-1"><div className="text-xs font-semibold text-slate-400 mb-1">→ In Progress</div>{active.map(g => <div key={g.id} className="text-sm text-slate-500 ml-3">• {g.title} ({g.progress}%)</div>)}</div>}
+                      {groups.map(([label, color, gs]) => gs.length > 0 && (
+                        <div key={label} className="mb-3">
+                          <div className={`text-xs font-semibold mb-1 ${color}`}>{label}</div>
+                          {gs.map(g => <div key={g.id} className="text-sm text-slate-700 ml-3">• {g.title}{g.sub_type!=="General"?<span className="ml-1 text-xs text-slate-400">[{g.sub_type}]</span>:""}</div>)}
+                        </div>
+                      ))}
                       {catGoals.length === 0 && <p className="text-sm text-slate-400">No goals in this category.</p>}
                     </div>
                   );
@@ -564,6 +889,7 @@
             )}
           </div>
 
+          {/* Pomodoro FAB */}
           <button onClick={() => setPomoOpen(o => !o)} className="fixed bottom-6 right-6 w-14 h-14 bg-red-500 hover:bg-red-600 text-white rounded-full shadow-lg text-2xl flex items-center justify-center z-40">🍅</button>
           {pomoOpen && (
             <div className="fixed bottom-24 right-6 bg-white rounded-2xl shadow-2xl border border-slate-200 w-72 p-5 z-40">
@@ -573,80 +899,103 @@
               </div>
               <div className="flex gap-2 mb-4">
                 {["work","break"].map(m => (
-                  <div key={m} className={`flex-1 text-center py-1 rounded-lg text-xs font-medium ${pomoMode === m ? (m === "work" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700") : "bg-slate-100 text-slate-400"}`}>
+                  <div key={m} className={`flex-1 text-center py-1 rounded-lg text-xs font-medium ${pomoMode===m?(m==="work"?"bg-red-100 text-red-700":"bg-emerald-100 text-emerald-700"):"bg-slate-100 text-slate-400"}`}>
                     {m === "work" ? "🎯 Work" : "☕ Break"}
                   </div>
                 ))}
               </div>
               <div className="text-center mb-4">
                 <div className="text-5xl font-mono font-bold text-slate-800">{fmtTime(pomoTime)}</div>
-                {pomoElapsed > 0 && <div className="text-xs text-slate-400 mt-1">Elapsed: {fmtTime(pomoElapsed)}</div>}
               </div>
-              <div className="mb-4">
+              <div className="mb-3">
                 <label className="text-xs text-slate-500 mb-1 block">Working on</label>
-                <select value={pomoTaskId} onChange={e => setPomoTaskId(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                <select value={pomoTaskId} onChange={e => setPomoTaskId(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm mb-2">
                   <option value="">— Select a task —</option>
                   {tasks.filter(t => !t.done).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}
                 </select>
+                <label className="text-xs text-slate-500 mb-1 block">Diary category</label>
+                <select value={pomoDiaryCategory} onChange={e => setPomoDiaryCategory(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                  {DIARY_CATS.map(c => <option key={c}>{c}</option>)}
+                </select>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => setPomoRunning(r => !r)} className={`flex-1 py-2 rounded-lg text-sm font-medium text-white ${pomoRunning ? "bg-yellow-500 hover:bg-yellow-600" : "bg-red-500 hover:bg-red-600"}`}>
-                  {pomoRunning ? "⏸ Pause" : "▶ Start"}
-                </button>
+                {!pomoRunning
+                  ? <button onClick={startPomo} className="flex-1 py-2 rounded-lg text-sm font-medium text-white bg-red-500 hover:bg-red-600">▶ Start</button>
+                  : <button onClick={pausePomo} className="flex-1 py-2 rounded-lg text-sm font-medium text-white bg-yellow-500 hover:bg-yellow-600">⏸ Pause</button>
+                }
                 <button onClick={pomoStop} className="flex-1 py-2 rounded-lg text-sm font-medium bg-emerald-500 hover:bg-emerald-600 text-white">⏹ Stop & Log</button>
                 <button onClick={pomoReset} className="px-3 py-2 rounded-lg text-sm bg-slate-100 hover:bg-slate-200 text-slate-600">↺</button>
               </div>
-              {pomoTaskId && pomoElapsed > 0 && <p className="text-xs text-slate-400 text-center mt-2">Stop will log {(pomoElapsed/3600).toFixed(2)}h to selected task</p>}
             </div>
           )}
 
-          {showGoalForm && editGoal && (
-            <Modal title={goals.find(g => g.id === editGoal.id) ? "Edit Goal" : "New Goal"} onClose={() => { setShowGoalForm(false); setEditGoal(null); }}>
-              <div className="space-y-4">
-                <Field label="Title"><input className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.title} onChange={e => setEditGoal({...editGoal, title: e.target.value})} placeholder="e.g. Submit paper to JMLR" /></Field>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="Category"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.category} onChange={e => setEditGoal({...editGoal, category: e.target.value})}>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</select></Field>
-                  <Field label="Status"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.status} onChange={e => setEditGoal({...editGoal, status: e.target.value})}>{STATUSES.map(s => <option key={s}>{s}</option>)}</select></Field>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="Submission Type"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.sub_type || "General"} onChange={e => setEditGoal({...editGoal, sub_type: e.target.value})}>{SUB_TYPES.map(s => <option key={s}>{s}</option>)}</select></Field>
-                  <Field label="Outcome"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.outcome || "N/A"} onChange={e => setEditGoal({...editGoal, outcome: e.target.value})}>{OUTCOMES.map(o => <option key={o}>{o}</option>)}</select></Field>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="Deadline"><input type="date" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.deadline} onChange={e => setEditGoal({...editGoal, deadline: e.target.value})} /></Field>
-                  <Field label={`Progress: ${editGoal.progress}%`}><input type="range" min="0" max="100" className="w-full mt-2" value={editGoal.progress} onChange={e => setEditGoal({...editGoal, progress: Number(e.target.value)})} /></Field>
-                </div>
-                <Field label="Notes / Next steps"><textarea className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" rows={2} value={editGoal.notes} onChange={e => setEditGoal({...editGoal, notes: e.target.value})} placeholder="e.g. Rejected from NeurIPS — revising for ICML" /></Field>
-                <div className="flex justify-end gap-2 pt-1">
-                  <button onClick={() => { setShowGoalForm(false); setEditGoal(null); }} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">Cancel</button>
-                  <button onClick={() => saveGoal(editGoal)} className="px-4 py-2 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-700">Save</button>
-                </div>
+          {/* Rollover Confirm */}
+          {showRolloverConfirm && (
+            <Modal title="Start New Week?" onClose={() => setShowRolloverConfirm(false)}>
+              <p className="text-sm text-slate-600 mb-4">This will archive all completed tasks and roll over unfinished tasks to the new week. Meetings will reset to 0.</p>
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setShowRolloverConfirm(false)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">Cancel</button>
+                <button onClick={doRollover} className="px-4 py-2 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-700">Confirm</button>
               </div>
             </Modal>
           )}
 
-          {showTaskForm && editTask && (
-            <Modal title={tasks.find(t => t.id === editTask.id) ? "Edit Task" : "New Task"} onClose={() => { setShowTaskForm(false); setEditTask(null); }}>
+          {/* Goal Form */}
+          {showGoalForm && editGoal && (
+            <Modal title={goals.find(g=>g.id===editGoal.id)?"Edit Goal":"New Goal"} onClose={()=>{setShowGoalForm(false);setEditGoal(null);}}>
               <div className="space-y-4">
-                <Field label="Task"><input className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.title} onChange={e => setEditTask({...editTask, title: e.target.value})} placeholder="e.g. Revise introduction" /></Field>
+                <Field label="Title"><input className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.title} onChange={e=>setEditGoal({...editGoal,title:e.target.value})} placeholder="e.g. Submit paper to JMLR" /></Field>
                 <div className="grid grid-cols-2 gap-3">
-                  <Field label="Linked Goal">
-                    <select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.goal_id || ""} onChange={e => setEditTask({...editTask, goal_id: Number(e.target.value)})}>
-                      <option value="">— None —</option>
-                      {goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}
-                    </select>
-                  </Field>
-                  <Field label="Priority"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.priority} onChange={e => setEditTask({...editTask, priority: e.target.value})}>{PRIORITIES.map(p => <option key={p}>{p}</option>)}</select></Field>
+                  <Field label="Category"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.category} onChange={e=>setEditGoal({...editGoal,category:e.target.value})}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></Field>
+                  <Field label="Status"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.status} onChange={e=>setEditGoal({...editGoal,status:e.target.value})}>{STATUSES.map(s=><option key={s}>{s}</option>)}</select></Field>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <Field label="Time Category"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.time_category || "Research"} onChange={e => setEditTask({...editTask, time_category: e.target.value})}>{TIME_CATS.map(c => <option key={c}>{c}</option>)}</select></Field>
-                  <Field label="Est. Hours"><input type="number" min="0" step="0.5" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.est_hours} onChange={e => setEditTask({...editTask, est_hours: e.target.value})} placeholder="e.g. 2.5" /></Field>
+                  <Field label="Submission Type"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.sub_type||"General"} onChange={e=>setEditGoal({...editGoal,sub_type:e.target.value})}>{SUB_TYPES.map(s=><option key={s}>{s}</option>)}</select></Field>
+                  <Field label="Outcome"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.outcome||"N/A"} onChange={e=>setEditGoal({...editGoal,outcome:e.target.value})}>{OUTCOMES.map(o=><option key={o}>{o}</option>)}</select></Field>
                 </div>
-                <Field label="Deadline"><input type="date" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.deadline} onChange={e => setEditTask({...editTask, deadline: e.target.value})} /></Field>
-                <div className="flex justify-end gap-2 pt-1">
-                  <button onClick={() => { setShowTaskForm(false); setEditTask(null); }} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700">Cancel</button>
-                  <button onClick={() => saveTask(editTask)} className="px-4 py-2 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-700">Save</button>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Deadline"><input type="date" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editGoal.deadline} onChange={e=>setEditGoal({...editGoal,deadline:e.target.value})} /></Field>
+                  <Field label={`Progress: ${editGoal.progress}%`}><input type="range" min="0" max="100" className="w-full mt-2" value={editGoal.progress} onChange={e=>setEditGoal({...editGoal,progress:Number(e.target.value)})} /></Field>
                 </div>
+                <Field label="Notes"><textarea className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" rows={2} value={editGoal.notes} onChange={e=>setEditGoal({...editGoal,notes:e.target.value})} placeholder="e.g. Rejected from NeurIPS — revising for ICML" /></Field>
+                <div className="flex justify-end gap-2"><button onClick={()=>{setShowGoalForm(false);setEditGoal(null);}} className="px-4 py-2 text-sm text-slate-500">Cancel</button><button onClick={()=>saveGoal(editGoal)} className="px-4 py-2 text-sm bg-slate-800 text-white rounded-lg">Save</button></div>
+              </div>
+            </Modal>
+          )}
+
+          {/* Task Form */}
+          {showTaskForm && editTask && (
+            <Modal title={tasks.find(t=>t.id===editTask.id)?"Edit Task":"New Task"} onClose={()=>{setShowTaskForm(false);setEditTask(null);}}>
+              <div className="space-y-4">
+                <Field label="Task"><input className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.title} onChange={e=>setEditTask({...editTask,title:e.target.value})} placeholder="e.g. Revise introduction" /></Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Linked Goal"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.goal_id||""} onChange={e=>setEditTask({...editTask,goal_id:Number(e.target.value)})}><option value="">— None —</option>{goals.map(g=><option key={g.id} value={g.id}>{g.title}</option>)}</select></Field>
+                  <Field label="Priority"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.priority} onChange={e=>setEditTask({...editTask,priority:e.target.value})}>{PRIORITIES.map(p=><option key={p}>{p}</option>)}</select></Field>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Time Category"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.time_category||"Research"} onChange={e=>setEditTask({...editTask,time_category:e.target.value})}>{TIME_CATS.map(c=><option key={c}>{c}</option>)}</select></Field>
+                  <Field label="Est. Hours"><input type="number" min="0" step="0.5" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.est_hours} onChange={e=>setEditTask({...editTask,est_hours:e.target.value})} placeholder="e.g. 2.5" /></Field>
+                </div>
+                <Field label="Deadline"><input type="date" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editTask.deadline} onChange={e=>setEditTask({...editTask,deadline:e.target.value})} /></Field>
+                <div className="flex justify-end gap-2"><button onClick={()=>{setShowTaskForm(false);setEditTask(null);}} className="px-4 py-2 text-sm text-slate-500">Cancel</button><button onClick={()=>saveTask(editTask)} className="px-4 py-2 text-sm bg-slate-800 text-white rounded-lg">Save</button></div>
+              </div>
+            </Modal>
+          )}
+
+          {/* Diary Form */}
+          {showDiaryForm && editDiary && (
+            <Modal title={diaryEntries.find(e=>e.id===editDiary.id)?"Edit Entry":"New Diary Entry"} onClose={()=>{setShowDiaryForm(false);setEditDiary(null);}}>
+              <div className="space-y-4">
+                <Field label="Activity"><input className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editDiary.activity} onChange={e=>setEditDiary({...editDiary,activity:e.target.value})} placeholder="e.g. Faculty meeting" /></Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Date"><input type="date" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editDiary.date} onChange={e=>setEditDiary({...editDiary,date:e.target.value})} /></Field>
+                  <Field label="Time of day"><input type="time" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editDiary.time_of_day} onChange={e=>setEditDiary({...editDiary,time_of_day:e.target.value})} /></Field>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Category"><select className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editDiary.category} onChange={e=>setEditDiary({...editDiary,category:e.target.value})}>{DIARY_CATS.map(c=><option key={c}>{c}</option>)}</select></Field>
+                  <Field label="Hours"><input type="number" min="0" step="0.25" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" value={editDiary.hours} onChange={e=>setEditDiary({...editDiary,hours:e.target.value})} placeholder="e.g. 1.5" /></Field>
+                </div>
+                <div className="flex justify-end gap-2"><button onClick={()=>{setShowDiaryForm(false);setEditDiary(null);}} className="px-4 py-2 text-sm text-slate-500">Cancel</button><button onClick={()=>saveDiary(editDiary)} className="px-4 py-2 text-sm bg-slate-800 text-white rounded-lg">Save</button></div>
               </div>
             </Modal>
           )}
@@ -654,27 +1003,70 @@
       );
     }
 
-    // ── Root ─────────────────────────────────────────────────────────────────
+    // Goal Card component
+    function GoalCard({ g, tasks, expandedGoal, setExpandedGoal, setEditGoal, setShowGoalForm, deleteGoal, setEditTask, setShowTaskForm, toggleTask, deleteTask, priorityColors, outcomeColors }) {
+      return (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div className="p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-medium text-slate-800">{g.title || "Untitled"}</span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColors[g.status]}`}>{g.status}</span>
+                  {g.sub_type !== "General" && <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{g.sub_type}</span>}
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${outcomeColors[g.outcome||"N/A"]}`}>{g.outcome||"N/A"}</span>
+                  <DeadlineBadge date={g.deadline} />
+                </div>
+                <div className="mt-3 flex items-center gap-3">
+                  <div className="flex-1 bg-slate-100 rounded-full h-2">
+                    <div className="bg-emerald-500 h-2 rounded-full" style={{width:`${g.progress}%`}} />
+                  </div>
+                  <span className="text-xs text-slate-400 w-8">{g.progress}%</span>
+                </div>
+                {g.notes && <p className="text-sm text-slate-500 mt-2 italic">{g.notes}</p>}
+              </div>
+              <div className="flex gap-1 shrink-0">
+                <button onClick={() => setExpandedGoal(expandedGoal === g.id ? null : g.id)} className="p-1.5 text-slate-400 hover:text-slate-600 text-xs">{expandedGoal === g.id ? "▲" : "▼"}</button>
+                <button onClick={() => { setEditGoal(g); setShowGoalForm(true); }} className="p-1.5 text-slate-400 hover:text-slate-600">✏️</button>
+                <button onClick={() => deleteGoal(g.id)} className="p-1.5 text-slate-400 hover:text-red-500">🗑</button>
+              </div>
+            </div>
+          </div>
+          {expandedGoal === g.id && (
+            <div className="border-t border-slate-100 bg-slate-50 px-4 py-3">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Linked Tasks</span>
+                <button onClick={() => { setEditTask({id: Date.now(), goal_id: g.id, title: "", priority: "Medium", deadline: "", done: false, est_hours: "", actual_hours: 0, time_category: "Research", week_key: getWeekKey()}); setShowTaskForm(true); }} className="text-xs text-slate-500 border border-slate-300 px-2 py-1 rounded-md">+ Task</button>
+              </div>
+              {tasks.filter(t => t.goal_id === g.id).length === 0 && <p className="text-xs text-slate-400">No tasks yet.</p>}
+              {tasks.filter(t => t.goal_id === g.id).map(t => (
+                <div key={t.id} className="flex items-center gap-2 py-1.5">
+                  <input type="checkbox" checked={t.done} onChange={() => toggleTask(t.id)} className="rounded" />
+                  <span className={`flex-1 text-sm ${t.done ? "line-through text-slate-400" : "text-slate-700"}`}>{t.title}</span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${priorityColors[t.priority]}`}>{t.priority}</span>
+                  {t.est_hours && <span className="text-xs text-slate-400">Est: {t.est_hours}h</span>}
+                  {t.actual_hours > 0 && <span className="text-xs text-emerald-600">Act: {t.actual_hours}h</span>}
+                  <DeadlineBadge date={t.deadline} />
+                  <button onClick={() => { setEditTask(t); setShowTaskForm(true); }} className="text-slate-300 hover:text-slate-500 text-xs">✏️</button>
+                  <button onClick={() => deleteTask(t.id)} className="text-slate-300 hover:text-red-400 text-xs">✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Root ──────────────────────────────────────────────────────────────────
     function Root() {
       const [user, setUser] = useState(null);
       const [checking, setChecking] = useState(true);
-
       useEffect(() => {
-        sb.auth.getSession().then(({ data: { session } }) => {
-          setUser(session?.user ?? null);
-          setChecking(false);
-        });
-        const { data: { subscription } } = sb.auth.onAuthStateChange((_e, session) => {
-          setUser(session?.user ?? null);
-        });
+        sb.auth.getSession().then(({ data: { session } }) => { setUser(session?.user ?? null); setChecking(false); });
+        const { data: { subscription } } = sb.auth.onAuthStateChange((_e, session) => { setUser(session?.user ?? null); });
         return () => subscription.unsubscribe();
       }, []);
-
-      if (checking) return (
-        <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-          <div className="text-center text-slate-400"><div className="text-4xl mb-3">🎓</div><p>Loading...</p></div>
-        </div>
-      );
+      if (checking) return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><div className="text-center text-slate-400"><div className="text-4xl mb-3">🎓</div><p>Loading...</p></div></div>;
       return user ? <TrackerApp user={user} /> : <AuthScreen />;
     }
 
